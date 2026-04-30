@@ -9,6 +9,10 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 
+# 🔍 DEBUG (TEMPORARY - REMOVE LATER)
+print("DEBUG TOKEN:", TELEGRAM_TOKEN)
+print("DEBUG CHAT ID:", TELEGRAM_CHAT_ID)
+
 SECTOR_MAP = {
     "^CNXIT": ["TCS.NS", "INFY.NS"],
     "^NSEBANK": ["HDFCBANK.NS", "ICICIBANK.NS"],
@@ -18,8 +22,23 @@ SECTOR_MAP = {
 
 # ================= TELEGRAM =================
 def send_telegram(msg):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("❌ Missing Telegram credentials")
+        return
+
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg})
+
+    try:
+        response = requests.post(url, json={
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": msg
+        })
+
+        print("Telegram response:", response.text)
+
+    except Exception as e:
+        print("Telegram error:", str(e))
+
 
 # ================= MARKET FILTER =================
 def is_market_bullish():
@@ -27,8 +46,10 @@ def is_market_bullish():
         df = yf.download("^NSEI", period="3mo", progress=False)
         df["EMA50"] = df["Close"].ewm(span=50).mean()
         return df.iloc[-1]["Close"] > df.iloc[-1]["EMA50"]
-    except:
+    except Exception as e:
+        print("Market check error:", e)
         return False
+
 
 # ================= SECTOR =================
 def get_top_sector():
@@ -46,6 +67,7 @@ def get_top_sector():
         return None, {}
 
     return max(perf, key=perf.get), perf
+
 
 # ================= INDICATORS =================
 def add_indicators(df):
@@ -68,10 +90,12 @@ def add_indicators(df):
 
     return df
 
+
 # ================= NEWS =================
 def get_news_score(symbol):
     if not NEWS_API_KEY:
         return 0
+
     try:
         url = f"https://newsapi.org/v2/everything?q={symbol}&apiKey={NEWS_API_KEY}"
         articles = requests.get(url, timeout=5).json().get("articles", [])[:3]
@@ -86,6 +110,7 @@ def get_news_score(symbol):
         return score
     except:
         return 0
+
 
 # ================= SCORING =================
 def score_stock(df, news_score):
@@ -119,6 +144,7 @@ def score_stock(df, news_score):
     score += news_score
     return score
 
+
 # ================= TRADE =================
 def generate_trade(df):
     latest = df.iloc[-1]
@@ -128,6 +154,7 @@ def generate_trade(df):
     rr = round((target - entry) / (entry - sl), 2)
     return entry, target, sl, rr
 
+
 # ================= MAIN =================
 def run():
     if not is_market_bullish():
@@ -136,7 +163,7 @@ def run():
 
     top_sector, _ = get_top_sector()
     if not top_sector:
-        send_telegram("⚠️ Error fetching data.")
+        send_telegram("⚠️ Error fetching sector data.")
         return
 
     best = None
@@ -148,7 +175,6 @@ def run():
                 continue
 
             df = add_indicators(df)
-
             news = get_news_score(stock.replace(".NS",""))
             score = score_stock(df, news)
 
@@ -168,7 +194,9 @@ def run():
                     "sl": sl,
                     "rr": rr
                 }
-        except:
+
+        except Exception as e:
+            print("Error with stock:", stock, e)
             continue
 
     if not best:
@@ -183,9 +211,11 @@ Target: ₹{best['target']}
 Stop Loss: ₹{best['sl']}
 R:R: {best['rr']}
 
-⚠️ Rule-based system. Trade selectively.
+⚠️ Rule-based system.
 """
+
     send_telegram(msg)
+
 
 if __name__ == "__main__":
     run()
