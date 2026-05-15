@@ -1,36 +1,33 @@
-name: Stock Bot
+name: NSE Scanner
 
 on:
-  schedule:
-    - cron: "0 5 * * 1-5"   # 10:30 AM IST (Mon–Fri)
   workflow_dispatch:
 
+  schedule:
+    - cron: "20 11 * * 1-5"
+
 jobs:
-  run:
+  scanner:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+
+    timeout-minutes: 45
 
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
-        with:
-          ref: main   # change if your default branch is master or something else
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip"
 
       - name: Install dependencies
         run: |
-          python -V
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run bot
+      - name: Run scanner
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          python -u main.py
+        run: python main.py
