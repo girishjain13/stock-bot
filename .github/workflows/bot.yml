@@ -1,4 +1,4 @@
-name: NSE Scanner
+name: Stock Bot
 
 on:
   workflow_dispatch:
