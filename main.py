@@ -169,6 +169,7 @@ def fetch_stock_history(symbol, start_dt, end_dt):
 
         df = df.reset_index()
 
+        # Handle MultiIndex columns
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
@@ -201,80 +202,6 @@ def fetch_stock_history(symbol, start_dt, end_dt):
     except Exception as e:
         log(f"{symbol} fetch failed: {e}")
         return pd.DataFrame()
-
-
-def fetch_nifty_history(start_dt, end_dt):
-    try:
-        # Using NIFTY ETF instead of ^NSEI
-        # More stable in GitHub Actions
-
-        df = yf.download(
-            "NIFTYBEES.NS",
-            start=start_dt,
-            end=end_dt,
-            progress=False,
-            auto_adjust=True,
-            threads=False
-        )
-
-        if df.empty:
-            log("NIFTY ETF dataframe empty")
-            return pd.DataFrame()
-
-        df = df.reset_index()
-
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-
-        df.columns = [str(c).strip() for c in df.columns]
-
-        required_cols = [
-            "Date",
-            "Open",
-            "High",
-            "Low",
-            "Close",
-            "Volume"
-        ]
-
-        missing = [
-            c for c in required_cols
-            if c not in df.columns
-        ]
-
-        if missing:
-            log(f"NIFTY ETF missing columns {missing}")
-            return pd.DataFrame()
-
-        df = df[required_cols]
-
-        df = df.dropna()
-
-        log(f"NIFTY ETF rows fetched: {len(df)}")
-
-        return df
-
-    except Exception as e:
-        log(f"NIFTY ETF fetch failed: {e}")
-        return pd.DataFrame()
-
-
-def is_market_bullish(nifty_df):
-    if nifty_df.empty or len(nifty_df) < 60:
-        return False, None, None
-
-    nifty_df = nifty_df.copy()
-
-    nifty_df["EMA50"] = ema(
-        nifty_df["Close"],
-        50
-    )
-
-    latest = nifty_df.iloc[-1]
-
-    bullish = latest["Close"] > latest["EMA50"]
-
-    return bullish, latest["Close"], latest["EMA50"]
 
 
 def score_candidate(latest, rel_strength):
@@ -380,71 +307,21 @@ def analyze_stock(symbol, stock_df, nifty_20d_ret):
     return result
 
 
-def build_alert(candidates, nifty_close, nifty_ema50):
-    header = (
-        f"📈 NSE 500 Swing Scanner\n"
-        f"NIFTY Trend ETF: {nifty_close:.2f}\n"
-        f"EMA50: {nifty_ema50:.2f}\n\n"
-    )
-
-    lines = []
-
-    for idx, c in enumerate(candidates, start=1):
-        lines.append(
-            f"{idx}. {c['symbol']}\n"
-            f"Entry: ₹{c['entry']}\n"
-            f"Target: ₹{c['target']}\n"
-            f"Stop: ₹{c['stop']}\n"
-            f"RSI: {c['rsi']}\n"
-            f"Volume Ratio: {c['vol_ratio']}x\n"
-            f"Relative Strength: {c['rel_strength_20d']}%\n"
-            f"Score: {c['score']}\n"
-        )
-
-    return header + "\n".join(lines)
-
-
 def run():
     today = date.today()
 
     start_dt = today - timedelta(days=LOOKBACK_DAYS)
 
-    log("Fetching NIFTY ETF history")
-
-    nifty_df = fetch_nifty_history(
-        start_dt,
-        today
-    )
-
-    log(nifty_df.tail())
-
-    bullish, nifty_close, nifty_ema50 = is_market_bullish(
-        nifty_df
-    )
-
-    if nifty_close is None or nifty_ema50 is None:
-        send_telegram(
-            "Failed to fetch NIFTY trend data."
-        )
-        return
-
-    if not bullish:
-        send_telegram(
-            f"Market not bullish.\n"
-            f"NIFTY ETF: {nifty_close:.2f}\n"
-            f"EMA50: {nifty_ema50:.2f}"
-        )
-        return
-
-    nifty_df = add_indicators(nifty_df)
-
-    nifty_20d_ret = nifty_df.iloc[-1]["RET_20D"]
+    log("Fetching NIFTY 500 symbols")
 
     symbols = fetch_nifty500_symbols()
 
     log(f"Scanning {len(symbols)} stocks")
 
     candidates = []
+
+    # Relative strength baseline
+    nifty_20d_ret = 0
 
     for idx, symbol in enumerate(symbols, start=1):
 
@@ -472,7 +349,9 @@ def run():
         time.sleep(SLEEP_BETWEEN_SYMBOLS)
 
     if not candidates:
-        send_telegram("No stocks passed filters today")
+        send_telegram(
+            "No stocks passed filters today"
+        )
         return
 
     candidates = sorted(
@@ -483,11 +362,26 @@ def run():
         )
     )[:TOP_N]
 
-    message = build_alert(
-        candidates,
-        nifty_close,
-        nifty_ema50
+    header = (
+        f"📈 NSE 500 Swing Scanner\n"
+        f"Top candidates: {len(candidates)}\n\n"
     )
+
+    lines = []
+
+    for idx, c in enumerate(candidates, start=1):
+        lines.append(
+            f"{idx}. {c['symbol']}\n"
+            f"Entry: ₹{c['entry']}\n"
+            f"Target: ₹{c['target']}\n"
+            f"Stop: ₹{c['stop']}\n"
+            f"RSI: {c['rsi']}\n"
+            f"Volume Ratio: {c['vol_ratio']}x\n"
+            f"Relative Strength: {c['rel_strength_20d']}%\n"
+            f"Score: {c['score']}\n"
+        )
+
+    message = header + "\n".join(lines)
 
     send_telegram(message)
 
