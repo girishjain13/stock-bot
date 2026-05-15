@@ -169,7 +169,6 @@ def fetch_stock_history(symbol, start_dt, end_dt):
 
         df = df.reset_index()
 
-        # Handle MultiIndex columns
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
@@ -206,8 +205,11 @@ def fetch_stock_history(symbol, start_dt, end_dt):
 
 def fetch_nifty_history(start_dt, end_dt):
     try:
+        # Using NIFTY ETF instead of ^NSEI
+        # More stable in GitHub Actions
+
         df = yf.download(
-            "^NSEI",
+            "NIFTYBEES.NS",
             start=start_dt,
             end=end_dt,
             progress=False,
@@ -216,12 +218,11 @@ def fetch_nifty_history(start_dt, end_dt):
         )
 
         if df.empty:
-            log("NIFTY dataframe empty")
+            log("NIFTY ETF dataframe empty")
             return pd.DataFrame()
 
         df = df.reset_index()
 
-        # Handle MultiIndex columns
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
@@ -242,17 +243,19 @@ def fetch_nifty_history(start_dt, end_dt):
         ]
 
         if missing:
-            log(f"NIFTY missing columns {missing}")
+            log(f"NIFTY ETF missing columns {missing}")
             return pd.DataFrame()
 
         df = df[required_cols]
 
         df = df.dropna()
 
+        log(f"NIFTY ETF rows fetched: {len(df)}")
+
         return df
 
     except Exception as e:
-        log(f"NIFTY fetch failed: {e}")
+        log(f"NIFTY ETF fetch failed: {e}")
         return pd.DataFrame()
 
 
@@ -380,7 +383,7 @@ def analyze_stock(symbol, stock_df, nifty_20d_ret):
 def build_alert(candidates, nifty_close, nifty_ema50):
     header = (
         f"📈 NSE 500 Swing Scanner\n"
-        f"Nifty50: {nifty_close:.2f}\n"
+        f"NIFTY Trend ETF: {nifty_close:.2f}\n"
         f"EMA50: {nifty_ema50:.2f}\n\n"
     )
 
@@ -406,7 +409,7 @@ def run():
 
     start_dt = today - timedelta(days=LOOKBACK_DAYS)
 
-    log("Fetching NIFTY history")
+    log("Fetching NIFTY ETF history")
 
     nifty_df = fetch_nifty_history(
         start_dt,
@@ -421,14 +424,14 @@ def run():
 
     if nifty_close is None or nifty_ema50 is None:
         send_telegram(
-            "Failed to fetch NIFTY data correctly."
+            "Failed to fetch NIFTY trend data."
         )
         return
 
     if not bullish:
         send_telegram(
             f"Market not bullish.\n"
-            f"NIFTY: {nifty_close:.2f}\n"
+            f"NIFTY ETF: {nifty_close:.2f}\n"
             f"EMA50: {nifty_ema50:.2f}"
         )
         return
