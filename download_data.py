@@ -1,4 +1,6 @@
 import os
+import time
+import random
 import pandas as pd
 import yfinance as yf
 
@@ -19,55 +21,81 @@ symbols = (
 
 print(f"Downloading data for {len(symbols)} stocks")
 
+
+def download_stock(symbol):
+
+    ticker = f"{symbol}.NS"
+
+    for attempt in range(3):
+
+        try:
+            print(f"Downloading {ticker} | Attempt {attempt + 1}")
+
+            df = yf.download(
+                ticker,
+                start="2018-01-01",
+                progress=False,
+                auto_adjust=True,
+                threads=False
+            )
+
+            if df.empty:
+                print(f"{symbol}: Empty dataframe")
+                return
+
+            df = df.reset_index()
+
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+
+            df.columns = [str(c).strip() for c in df.columns]
+
+            required_cols = [
+                "Date",
+                "Open",
+                "High",
+                "Low",
+                "Close",
+                "Volume"
+            ]
+
+            missing = [
+                c for c in required_cols
+                if c not in df.columns
+            ]
+
+            if missing:
+                print(f"{symbol}: Missing columns {missing}")
+                return
+
+            df = df[required_cols]
+
+            df.to_csv(f"data/{symbol}.csv", index=False)
+
+            print(f"{symbol}: Saved")
+
+            return
+
+        except Exception as e:
+
+            print(f"{symbol}: {e}")
+
+            sleep_time = random.randint(5, 15)
+
+            print(f"Sleeping {sleep_time}s before retry")
+
+            time.sleep(sleep_time)
+
+    print(f"{symbol}: Failed after retries")
+
+
 for idx, symbol in enumerate(symbols, start=1):
 
-    try:
-        ticker = f"{symbol}.NS"
+    print(f"\n[{idx}/{len(symbols)}]")
 
-        print(f"[{idx}/{len(symbols)}] Downloading {ticker}")
+    download_stock(symbol)
 
-        df = yf.download(
-            ticker,
-            start="2018-01-01",
-            progress=False,
-            auto_adjust=True,
-            threads=False
-        )
+    # Important rate-limit protection
+    time.sleep(random.uniform(1.5, 3.5))
 
-        if df.empty:
-            print(f"{symbol}: Empty dataframe")
-            continue
-
-        df = df.reset_index()
-
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-
-        df.columns = [str(c).strip() for c in df.columns]
-
-        required_cols = [
-            "Date",
-            "Open",
-            "High",
-            "Low",
-            "Close",
-            "Volume"
-        ]
-
-        missing = [
-            c for c in required_cols
-            if c not in df.columns
-        ]
-
-        if missing:
-            print(f"{symbol}: Missing columns {missing}")
-            continue
-
-        df = df[required_cols]
-
-        df.to_csv(f"data/{symbol}.csv", index=False)
-
-    except Exception as e:
-        print(symbol, e)
-
-print("Historical download completed")
+print("\nHistorical download completed")
