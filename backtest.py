@@ -4,18 +4,28 @@ import numpy as np
 
 DATA_FOLDER = "data"
 
+# ==============================
+# STRATEGY SETTINGS
+# ==============================
+
 TARGET_PCT = 0.05
-STOP_PCT = 0.035
-MAX_HOLD_DAYS = 15
+STOP_PCT = 0.01
+MAX_HOLD_DAYS = 5
 
 MIN_PRICE = 50
-MIN_VOL_RATIO = 1.2
-RSI_LOW = 55
-RSI_HIGH = 68
-MAX_DISTANCE_52W = 15.0
+MIN_VOL_RATIO = 2.5
+
+RSI_LOW = 60
+RSI_HIGH = 63
+
+MAX_DISTANCE_52W = 2.0
 
 trades = []
 
+
+# ==============================
+# INDICATORS
+# ==============================
 
 def ema(series, span):
     return series.ewm(span=span, adjust=False).mean()
@@ -60,6 +70,10 @@ def macd_hist(close):
     return hist
 
 
+# ==============================
+# ADD INDICATORS
+# ==============================
+
 def add_indicators(df):
 
     df = df.copy()
@@ -85,8 +99,16 @@ def add_indicators(df):
         min_periods=100
     ).max()
 
+    df["RET_20D"] = (
+        df["Close"].pct_change(20) * 100
+    )
+
     return df
 
+
+# ==============================
+# SIGNAL LOGIC
+# ==============================
 
 def signal(row, prev_row):
 
@@ -102,22 +124,72 @@ def signal(row, prev_row):
         * 100
     )
 
+    ema_separation = (
+        (row["EMA20"] - row["EMA50"])
+        / row["EMA50"]
+    )
+
     conditions = {
+
+        # Price Filters
         "price": row["Close"] >= MIN_PRICE,
+
+        # EMA Structure
         "ema20": row["Close"] > row["EMA20"],
         "ema50": row["Close"] > row["EMA50"],
         "ema200": row["Close"] > row["EMA200"],
-        "stack": row["EMA20"] > row["EMA50"] > row["EMA200"],
-        "rsi": RSI_LOW <= row["RSI14"] <= RSI_HIGH,
-        "macd": row["MACD_HIST"] > 0,
-        "macd_rising": row["MACD_HIST"] > prev_row["MACD_HIST"],
-        "liquidity": row["AVG_TRADED_VALUE20"] >= 20_00_00_000,
-        "volume": vol_ratio >= MIN_VOL_RATIO,
-        "near_high": dist_52w_high <= MAX_DISTANCE_52W,
+
+        # Strong Trend Stack
+        "stack":
+        row["EMA20"] > row["EMA50"] > row["EMA200"],
+
+        # Strong Momentum
+        "strong_trend":
+        row["Close"] > row["EMA20"] * 1.03,
+
+        # EMA Separation
+        "ema_separation":
+        ema_separation > 0.02,
+
+        # RSI Tight Range
+        "rsi":
+        RSI_LOW <= row["RSI14"] <= RSI_HIGH,
+
+        # MACD Confirmation
+        "macd":
+        row["MACD_HIST"] > 0,
+
+        # Rising Momentum
+        "macd_rising":
+        row["MACD_HIST"] > prev_row["MACD_HIST"],
+
+        # Liquidity
+        "liquidity":
+        row["AVG_TRADED_VALUE20"] >= 20_00_00_000,
+
+        # High Relative Volume
+        "volume":
+        vol_ratio >= MIN_VOL_RATIO,
+
+        # Near 52W High
+        "near_high":
+        dist_52w_high <= MAX_DISTANCE_52W,
+
+        # Strong 20D Momentum
+        "relative_strength":
+        row["RET_20D"] > 5,
+
+        # Breakout Confirmation
+        "breakout":
+        row["Close"] >= row["52W_HIGH"] * 0.98,
     }
 
-    return sum(conditions.values()) >= 9
+    return sum(conditions.values()) >= 12
 
+
+# ==============================
+# TRADE SIMULATION
+# ==============================
 
 def simulate_trade(df, signal_idx, symbol):
 
@@ -140,6 +212,7 @@ def simulate_trade(df, signal_idx, symbol):
 
         row = df.iloc[i]
 
+        # TARGET HIT
         if row["High"] >= target_price:
 
             trades.append({
@@ -154,6 +227,7 @@ def simulate_trade(df, signal_idx, symbol):
 
             return
 
+        # STOP LOSS HIT
         if row["Low"] <= stop_price:
 
             trades.append({
@@ -168,6 +242,7 @@ def simulate_trade(df, signal_idx, symbol):
 
             return
 
+    # TIME EXIT
     final_row = df.iloc[
         min(signal_idx + MAX_HOLD_DAYS, len(df) - 1)
     ]
@@ -189,12 +264,21 @@ def simulate_trade(df, signal_idx, symbol):
     })
 
 
+# ==============================
+# LOAD FILES
+# ==============================
+
 files = [
     f for f in os.listdir(DATA_FOLDER)
     if f.endswith(".csv")
 ]
 
 print(f"Backtesting {len(files)} stocks")
+
+
+# ==============================
+# RUN BACKTEST
+# ==============================
 
 for file in files:
 
@@ -213,7 +297,10 @@ for file in files:
 
         df = df.dropna().reset_index(drop=True)
 
-        for idx in range(1, len(df) - MAX_HOLD_DAYS - 1):
+        for idx in range(
+            1,
+            len(df) - MAX_HOLD_DAYS - 1
+        ):
 
             row = df.iloc[idx]
             prev_row = df.iloc[idx - 1]
@@ -225,6 +312,10 @@ for file in files:
         print(symbol, e)
 
 
+# ==============================
+# RESULTS
+# ==============================
+
 trades_df = pd.DataFrame(trades)
 
 trades_df.to_csv("trades.csv", index=False)
@@ -233,16 +324,35 @@ if len(trades_df) == 0:
     print("No trades generated")
     exit()
 
-wins = trades_df[trades_df["return_pct"] > 0]
-losses = trades_df[trades_df["return_pct"] <= 0]
+wins = trades_df[
+    trades_df["return_pct"] > 0
+]
 
-win_rate = len(wins) / len(trades_df) * 100
+losses = trades_df[
+    trades_df["return_pct"] <= 0
+]
 
-avg_return = trades_df["return_pct"].mean()
+win_rate = (
+    len(wins)
+    / len(trades_df)
+    * 100
+)
 
-avg_win = wins["return_pct"].mean() if len(wins) > 0 else 0
+avg_return = trades_df[
+    "return_pct"
+].mean()
 
-avg_loss = losses["return_pct"].mean() if len(losses) > 0 else 0
+avg_win = (
+    wins["return_pct"].mean()
+    if len(wins) > 0
+    else 0
+)
+
+avg_loss = (
+    losses["return_pct"].mean()
+    if len(losses) > 0
+    else 0
+)
 
 profit_factor = (
     wins["return_pct"].sum()
@@ -251,14 +361,23 @@ profit_factor = (
     else 0
 )
 
+# ==============================
+# SUMMARY
+# ==============================
+
 print("\n========== BACKTEST SUMMARY ==========")
+
 print(f"Total Trades: {len(trades_df)}")
 print(f"Winning Trades: {len(wins)}")
 print(f"Losing Trades: {len(losses)}")
+
 print(f"Win Rate: {win_rate:.2f}%")
+
 print(f"Average Return: {avg_return:.2f}%")
+
 print(f"Average Win: {avg_win:.2f}%")
 print(f"Average Loss: {avg_loss:.2f}%")
+
 print(f"Profit Factor: {profit_factor:.2f}")
 
 print("\nTrades saved to trades.csv")
