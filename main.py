@@ -166,7 +166,9 @@ def fetch_stock_history(symbol, start_dt, end_dt):
 
         df = df.reset_index()
 
-        required = [
+        df.columns = [str(c).strip() for c in df.columns]
+
+        required_cols = [
             "Date",
             "Open",
             "High",
@@ -175,7 +177,16 @@ def fetch_stock_history(symbol, start_dt, end_dt):
             "Volume"
         ]
 
-        df = df[required]
+        missing = [
+            c for c in required_cols
+            if c not in df.columns
+        ]
+
+        if missing:
+            log(f"{symbol}: Missing columns {missing}")
+            return pd.DataFrame()
+
+        df = df[required_cols]
 
         df = df.dropna()
 
@@ -202,7 +213,9 @@ def fetch_nifty_history(start_dt, end_dt):
 
         df = df.reset_index()
 
-        required = [
+        df.columns = [str(c).strip() for c in df.columns]
+
+        required_cols = [
             "Date",
             "Open",
             "High",
@@ -210,7 +223,18 @@ def fetch_nifty_history(start_dt, end_dt):
             "Close"
         ]
 
-        df = df[required]
+        missing = [
+            c for c in required_cols
+            if c not in df.columns
+        ]
+
+        if missing:
+            log(f"NIFTY missing columns {missing}")
+            return pd.DataFrame()
+
+        df = df[required_cols]
+
+        df = df.dropna()
 
         return df
 
