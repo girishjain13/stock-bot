@@ -36,6 +36,7 @@ def log(msg):
 
 def send_telegram(message: str):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        log("Telegram credentials missing")
         log(message)
         return
 
@@ -51,7 +52,8 @@ def send_telegram(message: str):
         r = requests.post(url, json=payload, timeout=30)
 
         if r.status_code != 200:
-            log(f"Telegram failed: {r.status_code} | {r.text}")
+            log(f"Telegram failed: {r.status_code}")
+            log(r.text)
         else:
             log("Telegram message sent")
 
@@ -157,14 +159,19 @@ def fetch_stock_history(symbol, start_dt, end_dt):
             start=start_dt,
             end=end_dt,
             progress=False,
-            auto_adjust=False,
+            auto_adjust=True,
             threads=False
         )
 
         if df.empty:
+            log(f"{symbol}: Empty dataframe")
             return pd.DataFrame()
 
         df = df.reset_index()
+
+        # Handle MultiIndex columns
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
 
         df.columns = [str(c).strip() for c in df.columns]
 
@@ -204,14 +211,19 @@ def fetch_nifty_history(start_dt, end_dt):
             start=start_dt,
             end=end_dt,
             progress=False,
-            auto_adjust=False,
+            auto_adjust=True,
             threads=False
         )
 
         if df.empty:
+            log("NIFTY dataframe empty")
             return pd.DataFrame()
 
         df = df.reset_index()
+
+        # Handle MultiIndex columns
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
 
         df.columns = [str(c).strip() for c in df.columns]
 
@@ -220,7 +232,8 @@ def fetch_nifty_history(start_dt, end_dt):
             "Open",
             "High",
             "Low",
-            "Close"
+            "Close",
+            "Volume"
         ]
 
         missing = [
@@ -400,15 +413,23 @@ def run():
         today
     )
 
+    log(nifty_df.tail())
+
     bullish, nifty_close, nifty_ema50 = is_market_bullish(
         nifty_df
     )
 
+    if nifty_close is None or nifty_ema50 is None:
+        send_telegram(
+            "Failed to fetch NIFTY data correctly."
+        )
+        return
+
     if not bullish:
         send_telegram(
             f"Market not bullish.\n"
-            f"NIFTY: {nifty_close}\n"
-            f"EMA50: {nifty_ema50}"
+            f"NIFTY: {nifty_close:.2f}\n"
+            f"EMA50: {nifty_ema50:.2f}"
         )
         return
 
