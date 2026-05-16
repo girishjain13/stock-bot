@@ -1,12 +1,25 @@
 import os
+import time
+import warnings
+import requests
 import pandas as pd
 import numpy as np
+import yfinance as yf
 
-DATA_FOLDER = "data"
+from datetime import date, timedelta
+
+warnings.filterwarnings("ignore")
+
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+NIFTY500_CSV_URL = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
+
+LOOKBACK_DAYS = 430
+TOP_N = 10
 
 TARGET_PCT = 0.04
 STOP_PCT = 0.025
-MAX_HOLD_DAYS = 60
 
 MIN_PRICE = 50
 MIN_VOL_RATIO = 1.5
@@ -14,7 +27,55 @@ MIN_VOL_RATIO = 1.5
 RSI_LOW = 50
 RSI_HIGH = 58
 
-trades = []
+MAX_HOLD_DAYS = 60
+
+SLEEP_BETWEEN_SYMBOLS = 1.0
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+def send_telegram(message):
+
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print(message)
+        return
+
+    url = (
+        f"https://api.telegram.org/bot"
+        f"{TELEGRAM_TOKEN}/sendMessage"
+    )
+
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message
+    }
+
+    try:
+        requests.post(
+            url,
+            json=payload,
+            timeout=30
+        )
+    except Exception as e:
+        print(e)
+
+
+def fetch_nifty500_symbols():
+
+    df = pd.read_csv(NIFTY500_CSV_URL)
+
+    symbols = (
+        df["Symbol"]
+        .dropna()
+        .astype(str)
+        .str.strip()
+        .unique()
+        .tolist()
+    )
+
+    return symbols
 
 
 def ema(series, span):
@@ -45,12 +106,14 @@ def rsi(series, period=14):
 
     rs = avg_gain / avg_loss.replace(0, np.nan)
 
-    return (
-        100 - (100 / (1 + rs))
-    ).fillna(0)
+    rsi_val = 100 - (100 / (1 + rs))
+
+    return rsi_val.fillna(0)
 
 
 def add_indicators(df):
+
+    df = df.copy()
 
     df["EMA20"] = ema(df["Close"], 20)
     df["EMA50"] = ema(df["Close"], 50)
@@ -69,229 +132,225 @@ def add_indicators(df):
     return df
 
 
-def signal(row):
+def fetch_stock_history(
+    symbol,
+    start_dt,
+    end_dt
+):
+
+    try:
+
+        yf_symbol = f"{symbol}.NS"
+
+        df = yf.download(
+            yf_symbol,
+            start=start_dt,
+            end=end_dt,
+            progress=False,
+            auto_adjust=True,
+            threads=False
+        )
+
+        if df.empty:
+            return pd.DataFrame()
+
+        df = df.reset_index()
+
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = (
+                df.columns.get_level_values(0)
+            )
+
+        df.columns = [
+            str(c).strip()
+            for c in df.columns
+        ]
+
+        required_cols = [
+            "Date",
+            "Open",
+            "High",
+            "Low",
+            "Close",
+            "Volume"
+        ]
+
+        missing = [
+            c for c in required_cols
+            if c not in df.columns
+        ]
+
+        if missing:
+            return pd.DataFrame()
+
+        df = df[required_cols]
+
+        return df.dropna()
+
+    except Exception:
+        return pd.DataFrame()
+
+
+def analyze_stock(symbol, stock_df):
+
+    if stock_df.empty or len(stock_df) < 250:
+        return None
+
+    df = add_indicators(stock_df)
+
+    latest = df.iloc[-1]
 
     vol_ratio = (
-        row["Volume"]
-        / row["VOL_AVG20"]
-        if row["VOL_AVG20"] > 0
+        latest["Volume"]
+        / latest["VOL_AVG20"]
+        if latest["VOL_AVG20"] > 0
         else 0
     )
 
     conditions = {
 
         "price":
-        row["Close"] >= MIN_PRICE,
+        latest["Close"] >= MIN_PRICE,
 
         "ema_stack":
-        row["EMA20"]
-        > row["EMA50"]
-        > row["EMA200"],
+        latest["EMA20"]
+        > latest["EMA50"]
+        > latest["EMA200"],
 
         "pullback":
-        row["Close"]
-        <= row["EMA20"] * 1.02,
+        latest["Close"]
+        <= latest["EMA20"] * 1.02,
 
         "above_ema50":
-        row["Close"] > row["EMA50"],
+        latest["Close"] > latest["EMA50"],
 
         "rsi":
-        RSI_LOW <= row["RSI14"] <= RSI_HIGH,
+        RSI_LOW <= latest["RSI14"] <= RSI_HIGH,
 
         "volume":
         vol_ratio >= MIN_VOL_RATIO,
 
         "relative_strength":
-        row["RET_20D"] > 3,
+        latest["RET_20D"] > 3,
     }
 
-    return sum(conditions.values()) >= 7
+    if sum(conditions.values()) < 7:
+        return None
 
+    entry = round(latest["Close"], 2)
 
-def simulate_trade(
-    df,
-    signal_idx,
-    symbol
-):
-
-    if signal_idx + 1 >= len(df):
-        return
-
-    entry_row = df.iloc[signal_idx + 1]
-
-    entry_price = entry_row["Open"]
-
-    target_price = (
-        entry_price
-        * (1 + TARGET_PCT)
+    target = round(
+        entry * (1 + TARGET_PCT),
+        2
     )
 
-    stop_price = (
-        entry_price
-        * (1 - STOP_PCT)
+    stop = round(
+        entry * (1 - STOP_PCT),
+        2
     )
 
-    entry_date = entry_row["Date"]
+    score = sum(conditions.values())
 
-    for i in range(
-        signal_idx + 1,
-        min(
-            signal_idx + MAX_HOLD_DAYS,
-            len(df) - 1
-        )
+    return {
+        "symbol": symbol,
+        "entry": entry,
+        "target": target,
+        "stop": stop,
+        "rsi": round(
+            latest["RSI14"],
+            2
+        ),
+        "vol_ratio": round(
+            vol_ratio,
+            2
+        ),
+        "score": score
+    }
+
+
+def run():
+
+    today = date.today()
+
+    start_dt = (
+        today
+        - timedelta(days=LOOKBACK_DAYS)
+    )
+
+    symbols = fetch_nifty500_symbols()
+
+    candidates = []
+
+    for idx, symbol in enumerate(
+        symbols,
+        start=1
     ):
 
-        row = df.iloc[i]
+        try:
 
-        if row["High"] >= target_price:
+            log(
+                f"[{idx}/{len(symbols)}] "
+                f"{symbol}"
+            )
 
-            trades.append({
-                "symbol": symbol,
-                "entry_date": entry_date,
-                "exit_date": row["Date"],
-                "return_pct":
-                TARGET_PCT * 100,
-                "result": "TARGET"
-            })
+            stock_df = fetch_stock_history(
+                symbol,
+                start_dt,
+                today
+            )
 
-            return
+            result = analyze_stock(
+                symbol,
+                stock_df
+            )
 
-        if row["Low"] <= stop_price:
+            if result:
+                candidates.append(result)
 
-            trades.append({
-                "symbol": symbol,
-                "entry_date": entry_date,
-                "exit_date": row["Date"],
-                "return_pct":
-                -STOP_PCT * 100,
-                "result": "STOP"
-            })
+        except Exception as e:
+            log(f"{symbol}: {e}")
 
-            return
-
-    final_row = df.iloc[
-        min(
-            signal_idx + MAX_HOLD_DAYS,
-            len(df) - 1
+        time.sleep(
+            SLEEP_BETWEEN_SYMBOLS
         )
-    ]
 
-    pnl_pct = (
-        (
-            final_row["Close"]
-            - entry_price
+    if not candidates:
+
+        send_telegram(
+            "No high-quality swing setups found"
         )
-        / entry_price
-        * 100
+
+        return
+
+    candidates = sorted(
+        candidates,
+        key=lambda x: (
+            -x["score"],
+            -x["vol_ratio"]
+        )
+    )[:TOP_N]
+
+    message = (
+        "📈 High Probability Swing Setups\n\n"
     )
 
-    trades.append({
-        "symbol": symbol,
-        "entry_date": entry_date,
-        "exit_date": final_row["Date"],
-        "return_pct": pnl_pct,
-        "result": "TIME_EXIT"
-    })
+    for idx, c in enumerate(
+        candidates,
+        start=1
+    ):
 
-
-files = [
-    f for f in os.listdir(DATA_FOLDER)
-    if f.endswith(".csv")
-]
-
-print(f"Backtesting {len(files)} stocks")
-
-for file in files:
-
-    symbol = file.replace(".csv", "")
-
-    try:
-
-        df = pd.read_csv(
-            f"{DATA_FOLDER}/{file}"
+        message += (
+            f"{idx}. {c['symbol']}\n"
+            f"Entry: ₹{c['entry']}\n"
+            f"Target: ₹{c['target']}\n"
+            f"Stop: ₹{c['stop']}\n"
+            f"RSI: {c['rsi']}\n"
+            f"Volume Ratio: "
+            f"{c['vol_ratio']}x\n\n"
         )
 
-        if len(df) < 250:
-            continue
-
-        df["Date"] = pd.to_datetime(
-            df["Date"]
-        )
-
-        df = add_indicators(df)
-
-        df = df.dropna().reset_index(
-            drop=True
-        )
-
-        for idx in range(
-            1,
-            len(df)
-            - MAX_HOLD_DAYS
-            - 1
-        ):
-
-            row = df.iloc[idx]
-
-            if signal(row):
-
-                simulate_trade(
-                    df,
-                    idx,
-                    symbol
-                )
-
-    except Exception as e:
-        print(symbol, e)
+    send_telegram(message)
 
 
-trades_df = pd.DataFrame(trades)
-
-trades_df.to_csv(
-    "trades.csv",
-    index=False
-)
-
-if len(trades_df) == 0:
-    print("No trades generated")
-    exit()
-
-wins = trades_df[
-    trades_df["return_pct"] > 0
-]
-
-losses = trades_df[
-    trades_df["return_pct"] <= 0
-]
-
-win_rate = (
-    len(wins)
-    / len(trades_df)
-    * 100
-)
-
-profit_factor = (
-    wins["return_pct"].sum()
-    / abs(losses["return_pct"].sum())
-)
-
-print(
-    "\n========== BACKTEST SUMMARY =========="
-)
-
-print(
-    f"Total Trades: {len(trades_df)}"
-)
-
-print(
-    f"Win Rate: {win_rate:.2f}%"
-)
-
-print(
-    f"Profit Factor: "
-    f"{profit_factor:.2f}"
-)
-
-print(
-    "\nTrades saved to trades.csv"
-)
+if __name__ == "__main__":
+    run()
