@@ -12,7 +12,9 @@ MIN_PRICE = 50
 MIN_VOL_RATIO = 1.5
 
 RSI_LOW = 52
-RSI_HIGH = 56
+RSI_HIGH = 58
+
+TOP_N_PER_DAY = 10
 
 trades = []
 
@@ -67,10 +69,20 @@ def add_indicators(df):
         df["Close"].pct_change(20) * 100
     )
 
+    tr = np.maximum(
+        df["High"] - df["Low"],
+        np.maximum(
+            abs(df["High"] - df["Close"].shift()),
+            abs(df["Low"] - df["Close"].shift())
+        )
+    )
+
     df["ATR14"] = (
-        (
-            df["High"] - df["Low"]
-        ).rolling(14).mean()
+        tr.rolling(14).mean()
+    )
+
+    df["ATR_PCT"] = (
+        df["ATR14"] / df["Close"]
     )
 
     return df
@@ -103,9 +115,6 @@ def signal(row, prev_row):
         > row["EMA50"]
         > row["EMA200"],
 
-        "above_ema50":
-        row["Close"] > row["EMA50"],
-
         "ema20_rising":
         row["EMA20"] > prev_row["EMA20"],
 
@@ -127,14 +136,22 @@ def signal(row, prev_row):
         "recovery":
         row["Close"] > prev_row["Close"],
 
-        "controlled_atr":
-        (
-            row["ATR14"]
-            / row["Close"]
-        ) < 0.035,
+        "atr_contraction":
+        row["ATR_PCT"] < 0.03,
     }
 
-    return sum(conditions.values()) >= 9
+    score = sum(conditions.values())
+
+    if score < 8:
+        return None
+
+    ranking_score = (
+        row["RET_20D"] * 0.5
+        + vol_ratio * 10
+        + score * 5
+    )
+
+    return ranking_score
 
 
 def simulate_trade(
@@ -225,6 +242,8 @@ def simulate_trade(
     })
 
 
+all_signals = []
+
 files = [
     f for f in os.listdir(DATA_FOLDER)
     if f.endswith(".csv")
@@ -268,19 +287,50 @@ for file in files:
 
             prev_row = df.iloc[idx - 1]
 
-            if signal(
+            ranking_score = signal(
                 row,
                 prev_row
-            ):
+            )
 
-                simulate_trade(
-                    df,
-                    idx,
-                    symbol
-                )
+            if ranking_score:
+
+                all_signals.append({
+                    "date": row["Date"],
+                    "symbol": symbol,
+                    "idx": idx,
+                    "score": ranking_score,
+                    "df": df
+                })
 
     except Exception as e:
         print(symbol, e)
+
+signals_df = pd.DataFrame(all_signals)
+
+if signals_df.empty:
+
+    print("No signals generated")
+
+    exit()
+
+signals_df = signals_df.sort_values(
+    ["date", "score"],
+    ascending=[True, False]
+)
+
+grouped = signals_df.groupby("date")
+
+selected_signals = grouped.head(
+    TOP_N_PER_DAY
+)
+
+for _, row in selected_signals.iterrows():
+
+    simulate_trade(
+        row["df"],
+        row["idx"],
+        row["symbol"]
+    )
 
 trades_df = pd.DataFrame(trades)
 
@@ -288,12 +338,6 @@ trades_df.to_csv(
     "trades.csv",
     index=False
 )
-
-if len(trades_df) == 0:
-
-    print("No trades generated")
-
-    exit()
 
 wins = trades_df[
     trades_df["return_pct"] > 0
