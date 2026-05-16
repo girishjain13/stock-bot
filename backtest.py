@@ -87,10 +87,10 @@ def signal(row, prev_row):
 
     pullback_zone = (
         row["Close"]
-        >= row["EMA20"] * 0.99
+        >= row["EMA20"] * 0.985
     ) and (
         row["Close"]
-        <= row["EMA20"] * 1.01
+        <= row["EMA20"] * 1.02
     )
 
     conditions = {
@@ -116,7 +116,7 @@ def signal(row, prev_row):
         RSI_LOW <= row["RSI14"] <= RSI_HIGH,
 
         "relative_strength":
-        row["RET_20D"] > 8,
+        row["RET_20D"] > 5,
 
         "volume":
         vol_ratio >= MIN_VOL_RATIO,
@@ -134,7 +134,7 @@ def signal(row, prev_row):
         ) < 0.035,
     }
 
-    return sum(conditions.values()) >= 11
+    return sum(conditions.values()) >= 9
 
 
 def simulate_trade(
