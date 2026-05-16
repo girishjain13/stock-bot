@@ -1,84 +1,31 @@
 import os
-import time
-import warnings
-import requests
 import pandas as pd
 import numpy as np
-import yfinance as yf
 
-from datetime import date, timedelta
+DATA_FOLDER = "data"
 
-warnings.filterwarnings("ignore")
-
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-
-NIFTY500_CSV_URL = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
-
-LOOKBACK_DAYS = 430
-TOP_N = 10
+# =========================================
+# STRATEGY SETTINGS
+# =========================================
 
 TARGET_PCT = 0.04
 STOP_PCT = 0.025
+MAX_HOLD_DAYS = 60
 
 MIN_PRICE = 50
 MIN_VOL_RATIO = 1.5
 
-RSI_LOW = 50
-RSI_HIGH = 58
+RSI_LOW = 52
+RSI_HIGH = 56
 
-MAX_HOLD_DAYS = 60
+trades = []
 
-SLEEP_BETWEEN_SYMBOLS = 1.0
-
-
-def log(msg):
-    print(msg, flush=True)
-
-
-def send_telegram(message):
-
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print(message)
-        return
-
-    url = (
-        f"https://api.telegram.org/bot"
-        f"{TELEGRAM_TOKEN}/sendMessage"
-    )
-
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message
-    }
-
-    try:
-        requests.post(
-            url,
-            json=payload,
-            timeout=30
-        )
-    except Exception as e:
-        print(e)
-
-
-def fetch_nifty500_symbols():
-
-    df = pd.read_csv(NIFTY500_CSV_URL)
-
-    symbols = (
-        df["Symbol"]
-        .dropna()
-        .astype(str)
-        .str.strip()
-        .unique()
-        .tolist()
-    )
-
-    return symbols
-
+# =========================================
+# INDICATORS
+# =========================================
 
 def ema(series, span):
+
     return series.ewm(
         span=span,
         adjust=False
@@ -111,6 +58,10 @@ def rsi(series, period=14):
     return rsi_val.fillna(0)
 
 
+# =========================================
+# ADD INDICATORS
+# =========================================
+
 def add_indicators(df):
 
     df = df.copy()
@@ -129,228 +80,360 @@ def add_indicators(df):
         df["Close"].pct_change(20) * 100
     )
 
+    df["ATR14"] = (
+        (
+            df["High"] - df["Low"]
+        ).rolling(14).mean()
+    )
+
     return df
 
 
-def fetch_stock_history(
-    symbol,
-    start_dt,
-    end_dt
-):
+# =========================================
+# SIGNAL LOGIC
+# =========================================
 
-    try:
-
-        yf_symbol = f"{symbol}.NS"
-
-        df = yf.download(
-            yf_symbol,
-            start=start_dt,
-            end=end_dt,
-            progress=False,
-            auto_adjust=True,
-            threads=False
-        )
-
-        if df.empty:
-            return pd.DataFrame()
-
-        df = df.reset_index()
-
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = (
-                df.columns.get_level_values(0)
-            )
-
-        df.columns = [
-            str(c).strip()
-            for c in df.columns
-        ]
-
-        required_cols = [
-            "Date",
-            "Open",
-            "High",
-            "Low",
-            "Close",
-            "Volume"
-        ]
-
-        missing = [
-            c for c in required_cols
-            if c not in df.columns
-        ]
-
-        if missing:
-            return pd.DataFrame()
-
-        df = df[required_cols]
-
-        return df.dropna()
-
-    except Exception:
-        return pd.DataFrame()
-
-
-def analyze_stock(symbol, stock_df):
-
-    if stock_df.empty or len(stock_df) < 250:
-        return None
-
-    df = add_indicators(stock_df)
-
-    latest = df.iloc[-1]
+def signal(row, prev_row):
 
     vol_ratio = (
-        latest["Volume"]
-        / latest["VOL_AVG20"]
-        if latest["VOL_AVG20"] > 0
+        row["Volume"]
+        / row["VOL_AVG20"]
+        if row["VOL_AVG20"] > 0
         else 0
+    )
+
+    pullback_zone = (
+        row["Close"]
+        >= row["EMA20"] * 0.99
+    ) and (
+        row["Close"]
+        <= row["EMA20"] * 1.01
     )
 
     conditions = {
 
+        # =================================
+        # TREND FILTERS
+        # =================================
+
         "price":
-        latest["Close"] >= MIN_PRICE,
+        row["Close"] >= MIN_PRICE,
 
         "ema_stack":
-        latest["EMA20"]
-        > latest["EMA50"]
-        > latest["EMA200"],
-
-        "pullback":
-        latest["Close"]
-        <= latest["EMA20"] * 1.02,
+        row["EMA20"]
+        > row["EMA50"]
+        > row["EMA200"],
 
         "above_ema50":
-        latest["Close"] > latest["EMA50"],
+        row["Close"] > row["EMA50"],
+
+        "ema20_rising":
+        row["EMA20"] > prev_row["EMA20"],
+
+        # =================================
+        # PULLBACK FILTER
+        # =================================
+
+        "pullback":
+        pullback_zone,
+
+        # =================================
+        # MOMENTUM FILTERS
+        # =================================
 
         "rsi":
-        RSI_LOW <= latest["RSI14"] <= RSI_HIGH,
+        RSI_LOW <= row["RSI14"] <= RSI_HIGH,
+
+        "relative_strength":
+        row["RET_20D"] > 8,
+
+        # =================================
+        # VOLUME FILTER
+        # =================================
 
         "volume":
         vol_ratio >= MIN_VOL_RATIO,
 
-        "relative_strength":
-        latest["RET_20D"] > 3,
+        # =================================
+        # PRICE ACTION CONFIRMATION
+        # =================================
+
+        "bullish_candle":
+        row["Close"] > row["Open"],
+
+        "recovery":
+        row["Close"] > prev_row["Close"],
+
+        # =================================
+        # VOLATILITY FILTER
+        # =================================
+
+        "controlled_atr":
+        (
+            row["ATR14"]
+            / row["Close"]
+        ) < 0.035,
     }
 
-    if sum(conditions.values()) < 7:
-        return None
-
-    entry = round(latest["Close"], 2)
-
-    target = round(
-        entry * (1 + TARGET_PCT),
-        2
-    )
-
-    stop = round(
-        entry * (1 - STOP_PCT),
-        2
-    )
-
-    score = sum(conditions.values())
-
-    return {
-        "symbol": symbol,
-        "entry": entry,
-        "target": target,
-        "stop": stop,
-        "rsi": round(
-            latest["RSI14"],
-            2
-        ),
-        "vol_ratio": round(
-            vol_ratio,
-            2
-        ),
-        "score": score
-    }
+    return sum(conditions.values()) >= 9
 
 
-def run():
+# =========================================
+# TRADE SIMULATION
+# =========================================
 
-    today = date.today()
+def simulate_trade(
+    df,
+    signal_idx,
+    symbol
+):
 
-    start_dt = (
-        today
-        - timedelta(days=LOOKBACK_DAYS)
-    )
-
-    symbols = fetch_nifty500_symbols()
-
-    candidates = []
-
-    for idx, symbol in enumerate(
-        symbols,
-        start=1
-    ):
-
-        try:
-
-            log(
-                f"[{idx}/{len(symbols)}] "
-                f"{symbol}"
-            )
-
-            stock_df = fetch_stock_history(
-                symbol,
-                start_dt,
-                today
-            )
-
-            result = analyze_stock(
-                symbol,
-                stock_df
-            )
-
-            if result:
-                candidates.append(result)
-
-        except Exception as e:
-            log(f"{symbol}: {e}")
-
-        time.sleep(
-            SLEEP_BETWEEN_SYMBOLS
-        )
-
-    if not candidates:
-
-        send_telegram(
-            "No high-quality swing setups found"
-        )
-
+    if signal_idx + 1 >= len(df):
         return
 
-    candidates = sorted(
-        candidates,
-        key=lambda x: (
-            -x["score"],
-            -x["vol_ratio"]
-        )
-    )[:TOP_N]
+    entry_row = df.iloc[
+        signal_idx + 1
+    ]
 
-    message = (
-        "📈 High Probability Swing Setups\n\n"
+    entry_price = entry_row["Open"]
+
+    target_price = (
+        entry_price
+        * (1 + TARGET_PCT)
     )
 
-    for idx, c in enumerate(
-        candidates,
-        start=1
+    stop_price = (
+        entry_price
+        * (1 - STOP_PCT)
+    )
+
+    entry_date = entry_row["Date"]
+
+    for i in range(
+        signal_idx + 1,
+        min(
+            signal_idx + MAX_HOLD_DAYS,
+            len(df) - 1
+        )
     ):
 
-        message += (
-            f"{idx}. {c['symbol']}\n"
-            f"Entry: ₹{c['entry']}\n"
-            f"Target: ₹{c['target']}\n"
-            f"Stop: ₹{c['stop']}\n"
-            f"RSI: {c['rsi']}\n"
-            f"Volume Ratio: "
-            f"{c['vol_ratio']}x\n\n"
+        row = df.iloc[i]
+
+        # TARGET HIT
+        if row["High"] >= target_price:
+
+            trades.append({
+                "symbol": symbol,
+                "entry_date": entry_date,
+                "exit_date": row["Date"],
+                "return_pct":
+                TARGET_PCT * 100,
+                "result": "TARGET"
+            })
+
+            return
+
+        # STOP LOSS HIT
+        if row["Low"] <= stop_price:
+
+            trades.append({
+                "symbol": symbol,
+                "entry_date": entry_date,
+                "exit_date": row["Date"],
+                "return_pct":
+                -STOP_PCT * 100,
+                "result": "STOP"
+            })
+
+            return
+
+    # TIME EXIT
+    final_row = df.iloc[
+        min(
+            signal_idx + MAX_HOLD_DAYS,
+            len(df) - 1
+        )
+    ]
+
+    pnl_pct = (
+        (
+            final_row["Close"]
+            - entry_price
+        )
+        / entry_price
+        * 100
+    )
+
+    trades.append({
+        "symbol": symbol,
+        "entry_date": entry_date,
+        "exit_date": final_row["Date"],
+        "return_pct": pnl_pct,
+        "result": "TIME_EXIT"
+    })
+
+
+# =========================================
+# LOAD FILES
+# =========================================
+
+files = [
+    f for f in os.listdir(DATA_FOLDER)
+    if f.endswith(".csv")
+]
+
+print(
+    f"Backtesting {len(files)} stocks"
+)
+
+# =========================================
+# RUN BACKTEST
+# =========================================
+
+for file in files:
+
+    symbol = file.replace(".csv", "")
+
+    try:
+
+        df = pd.read_csv(
+            f"{DATA_FOLDER}/{file}"
         )
 
-    send_telegram(message)
+        if len(df) < 250:
+            continue
 
+        df["Date"] = pd.to_datetime(
+            df["Date"]
+        )
 
-if __name__ == "__main__":
-    run()
+        df = add_indicators(df)
+
+        df = df.dropna().reset_index(
+            drop=True
+        )
+
+        for idx in range(
+            1,
+            len(df)
+            - MAX_HOLD_DAYS
+            - 1
+        ):
+
+            row = df.iloc[idx]
+
+            prev_row = df.iloc[idx - 1]
+
+            if signal(
+                row,
+                prev_row
+            ):
+
+                simulate_trade(
+                    df,
+                    idx,
+                    symbol
+                )
+
+    except Exception as e:
+        print(symbol, e)
+
+# =========================================
+# RESULTS
+# =========================================
+
+trades_df = pd.DataFrame(trades)
+
+trades_df.to_csv(
+    "trades.csv",
+    index=False
+)
+
+if len(trades_df) == 0:
+
+    print("No trades generated")
+
+    exit()
+
+wins = trades_df[
+    trades_df["return_pct"] > 0
+]
+
+losses = trades_df[
+    trades_df["return_pct"] <= 0
+]
+
+win_rate = (
+    len(wins)
+    / len(trades_df)
+    * 100
+)
+
+avg_return = trades_df[
+    "return_pct"
+].mean()
+
+avg_win = (
+    wins["return_pct"].mean()
+    if len(wins) > 0
+    else 0
+)
+
+avg_loss = (
+    losses["return_pct"].mean()
+    if len(losses) > 0
+    else 0
+)
+
+profit_factor = (
+    wins["return_pct"].sum()
+    / abs(losses["return_pct"].sum())
+)
+
+# =========================================
+# SUMMARY
+# =========================================
+
+print(
+    "\n========== BACKTEST SUMMARY =========="
+)
+
+print(
+    f"Total Trades: {len(trades_df)}"
+)
+
+print(
+    f"Winning Trades: {len(wins)}"
+)
+
+print(
+    f"Losing Trades: {len(losses)}"
+)
+
+print(
+    f"Win Rate: {win_rate:.2f}%"
+)
+
+print(
+    f"Average Return: "
+    f"{avg_return:.2f}%"
+)
+
+print(
+    f"Average Win: "
+    f"{avg_win:.2f}%"
+)
+
+print(
+    f"Average Loss: "
+    f"{avg_loss:.2f}%"
+)
+
+print(
+    f"Profit Factor: "
+    f"{profit_factor:.2f}"
+)
+
+print(
+    "\nTrades saved to trades.csv"
+)
