@@ -25,7 +25,7 @@ MIN_PRICE = 50
 MIN_VOL_RATIO = 1.5
 
 RSI_LOW = 52
-RSI_HIGH = 56
+RSI_HIGH = 58
 
 TOP_N = 10
 
@@ -109,10 +109,20 @@ def add_indicators(df):
         df["Close"].pct_change(20) * 100
     )
 
+    tr = np.maximum(
+        df["High"] - df["Low"],
+        np.maximum(
+            abs(df["High"] - df["Close"].shift()),
+            abs(df["Low"] - df["Close"].shift())
+        )
+    )
+
     df["ATR14"] = (
-        (
-            df["High"] - df["Low"]
-        ).rolling(14).mean()
+        tr.rolling(14).mean()
+    )
+
+    df["ATR_PCT"] = (
+        df["ATR14"] / df["Close"]
     )
 
     return df
@@ -188,11 +198,6 @@ def market_is_bullish():
     if nifty_df.empty:
         return False
 
-    nifty_df["EMA50"] = ema(
-        nifty_df["Close"],
-        50
-    )
-
     nifty_df["EMA200"] = ema(
         nifty_df["Close"],
         200
@@ -241,9 +246,6 @@ def analyze_stock(symbol, df):
         > latest["EMA50"]
         > latest["EMA200"],
 
-        "above_ema50":
-        latest["Close"] > latest["EMA50"],
-
         "ema20_rising":
         latest["EMA20"] > prev["EMA20"],
 
@@ -265,17 +267,20 @@ def analyze_stock(symbol, df):
         "recovery":
         latest["Close"] > prev["Close"],
 
-        "controlled_atr":
-        (
-            latest["ATR14"]
-            / latest["Close"]
-        ) < 0.035,
+        "atr_contraction":
+        latest["ATR_PCT"] < 0.03,
     }
 
     score = sum(conditions.values())
 
-    if score < 9:
+    if score < 8:
         return None
+
+    ranking_score = (
+        latest["RET_20D"] * 0.5
+        + vol_ratio * 10
+        + score * 5
+    )
 
     entry = round(latest["Close"], 2)
 
@@ -294,7 +299,7 @@ def analyze_stock(symbol, df):
         "entry": entry,
         "target": target,
         "stop": stop,
-        "score": score,
+        "score": round(ranking_score, 2),
         "rsi": round(
             latest["RSI14"],
             2
@@ -370,17 +375,21 @@ def run():
         return
 
     message = (
-        "📈 Swing Setups\n\n"
+        "📈 Ranked Swing Setups\n\n"
     )
 
-    for c in candidates:
+    for idx, c in enumerate(
+        candidates,
+        start=1
+    ):
 
         message += (
-            f"{c['symbol']}\n"
+            f"{idx}. {c['symbol']}\n"
             f"Entry: ₹{c['entry']}\n"
             f"Target: ₹{c['target']}\n"
             f"Stop: ₹{c['stop']}\n"
-            f"RSI: {c['rsi']}\n\n"
+            f"RSI: {c['rsi']}\n"
+            f"Score: {c['score']}\n\n"
         )
 
     send_telegram(message)
