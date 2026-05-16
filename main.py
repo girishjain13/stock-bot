@@ -31,30 +31,6 @@ TOP_N = 10
 
 SLEEP_BETWEEN_SYMBOLS = 1.0
 
-SECTOR_MAP = {
-    "INFY": "IT",
-    "TCS": "IT",
-    "WIPRO": "IT",
-    "HCLTECH": "IT",
-    "TECHM": "IT",
-
-    "HDFCBANK": "BANK",
-    "ICICIBANK": "BANK",
-    "SBIN": "BANK",
-    "AXISBANK": "BANK",
-
-    "RELIANCE": "ENERGY",
-    "ONGC": "ENERGY",
-
-    "SUNPHARMA": "PHARMA",
-    "DRREDDY": "PHARMA",
-    "CIPLA": "PHARMA",
-}
-
-
-def log(msg):
-    print(msg, flush=True)
-
 
 def send_telegram(message):
 
@@ -227,9 +203,6 @@ def market_is_bullish():
     return (
         latest["Close"]
         > latest["EMA200"]
-        and
-        latest["EMA50"]
-        > latest["EMA200"]
     )
 
 
@@ -252,10 +225,10 @@ def analyze_stock(symbol, df):
 
     pullback_zone = (
         latest["Close"]
-        >= latest["EMA20"] * 0.99
+        >= latest["EMA20"] * 0.985
     ) and (
         latest["Close"]
-        <= latest["EMA20"] * 1.01
+        <= latest["EMA20"] * 1.02
     )
 
     conditions = {
@@ -281,7 +254,7 @@ def analyze_stock(symbol, df):
         RSI_LOW <= latest["RSI14"] <= RSI_HIGH,
 
         "relative_strength":
-        latest["RET_20D"] > 8,
+        latest["RET_20D"] > 5,
 
         "volume":
         vol_ratio >= MIN_VOL_RATIO,
@@ -301,7 +274,7 @@ def analyze_stock(symbol, df):
 
     score = sum(conditions.values())
 
-    if score < 11:
+    if score < 9:
         return None
 
     entry = round(latest["Close"], 2)
@@ -334,7 +307,7 @@ def run():
     if not market_is_bullish():
 
         send_telegram(
-            "Market trend is bearish. No trades."
+            "Market trend bearish. No trades."
         )
 
         return
@@ -391,13 +364,13 @@ def run():
     if not candidates:
 
         send_telegram(
-            "No high-quality setups found."
+            "No quality setups found."
         )
 
         return
 
     message = (
-        "📈 High Probability Swing Setups\n\n"
+        "📈 Swing Setups\n\n"
     )
 
     for c in candidates:
