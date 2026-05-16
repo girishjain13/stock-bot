@@ -11,13 +11,14 @@ MAX_HOLD_DAYS = 60
 MIN_PRICE = 50
 MIN_VOL_RATIO = 1.5
 
-RSI_LOW = 50
-RSI_HIGH = 58
+RSI_LOW = 52
+RSI_HIGH = 56
 
 trades = []
 
 
 def ema(series, span):
+
     return series.ewm(
         span=span,
         adjust=False
@@ -66,16 +67,30 @@ def add_indicators(df):
         df["Close"].pct_change(20) * 100
     )
 
+    df["ATR14"] = (
+        (
+            df["High"] - df["Low"]
+        ).rolling(14).mean()
+    )
+
     return df
 
 
-def signal(row):
+def signal(row, prev_row):
 
     vol_ratio = (
         row["Volume"]
         / row["VOL_AVG20"]
         if row["VOL_AVG20"] > 0
         else 0
+    )
+
+    pullback_zone = (
+        row["Close"]
+        >= row["EMA20"] * 0.99
+    ) and (
+        row["Close"]
+        <= row["EMA20"] * 1.01
     )
 
     conditions = {
@@ -88,24 +103,38 @@ def signal(row):
         > row["EMA50"]
         > row["EMA200"],
 
-        "pullback":
-        row["Close"]
-        <= row["EMA20"] * 1.02,
-
         "above_ema50":
         row["Close"] > row["EMA50"],
+
+        "ema20_rising":
+        row["EMA20"] > prev_row["EMA20"],
+
+        "pullback":
+        pullback_zone,
 
         "rsi":
         RSI_LOW <= row["RSI14"] <= RSI_HIGH,
 
+        "relative_strength":
+        row["RET_20D"] > 8,
+
         "volume":
         vol_ratio >= MIN_VOL_RATIO,
 
-        "relative_strength":
-        row["RET_20D"] > 3,
+        "bullish_candle":
+        row["Close"] > row["Open"],
+
+        "recovery":
+        row["Close"] > prev_row["Close"],
+
+        "controlled_atr":
+        (
+            row["ATR14"]
+            / row["Close"]
+        ) < 0.035,
     }
 
-    return sum(conditions.values()) >= 7
+    return sum(conditions.values()) >= 11
 
 
 def simulate_trade(
@@ -117,7 +146,9 @@ def simulate_trade(
     if signal_idx + 1 >= len(df):
         return
 
-    entry_row = df.iloc[signal_idx + 1]
+    entry_row = df.iloc[
+        signal_idx + 1
+    ]
 
     entry_price = entry_row["Open"]
 
@@ -199,7 +230,9 @@ files = [
     if f.endswith(".csv")
 ]
 
-print(f"Backtesting {len(files)} stocks")
+print(
+    f"Backtesting {len(files)} stocks"
+)
 
 for file in files:
 
@@ -233,7 +266,12 @@ for file in files:
 
             row = df.iloc[idx]
 
-            if signal(row):
+            prev_row = df.iloc[idx - 1]
+
+            if signal(
+                row,
+                prev_row
+            ):
 
                 simulate_trade(
                     df,
@@ -244,7 +282,6 @@ for file in files:
     except Exception as e:
         print(symbol, e)
 
-
 trades_df = pd.DataFrame(trades)
 
 trades_df.to_csv(
@@ -253,7 +290,9 @@ trades_df.to_csv(
 )
 
 if len(trades_df) == 0:
+
     print("No trades generated")
+
     exit()
 
 wins = trades_df[
